@@ -56,7 +56,6 @@ function renderPatients(){const term=$('#search').value.trim().toLowerCase(),lvl
 function formSummary(){const f=$('#triageForm');const val=n=>f.elements[n].value;const lvl=val('level');$('#formSummary').innerHTML=`<strong>รหัส:</strong> ${safe(val('code')||'ยังไม่ระบุ')}<br><strong>อายุ:</strong> ${safe(val('age')||'-')} ปี<br><strong>อาการ:</strong> ${safe(val('complaint')||'-')}<br><strong>BP:</strong> ${safe(val('sbp')||'-')}/${safe(val('dbp')||'-')} mmHg<br><strong>SpO₂:</strong> ${safe(val('spo2')||'-')}%<br><strong>ระดับ:</strong> ${lvl?pill(Number(lvl)):'ยังไม่เลือก'}<br><strong>สถานะ:</strong> ${safe(val('state'))}`}
 $('#triageForm').addEventListener('input',formSummary);$('#triageForm').addEventListener('change',formSummary);
 function notify(t){const el=$('#toast');el.textContent=t;el.classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>el.classList.remove('show'),3500)}
-$('#triageForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;if(!f.reportValidity())return;const d=Object.fromEntries(new FormData(f).entries());if(records.some(r=>r.code.toLowerCase()===d.code.trim().toLowerCase())){notify('รหัสผู้ป่วยจำลองนี้มีแล้ว โปรดใช้รหัสอื่น');f.elements.code.focus();return}const time=new Intl.DateTimeFormat('th-TH',{hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date());records.push({...d,code:d.code.trim(),level:Number(d.level),time});f.reset();formSummary();notify('บันทึกข้อมูลจำลองสำเร็จ (ยังไม่ได้ส่งไป Google Sheets)');navigate('patients')});
 $('#resetDemo').addEventListener('click',()=>{if(confirm('คืนค่าข้อมูลจำลองเริ่มต้นทั้งหมด? รายการที่คุณเพิ่มจะหายไป')){records=dummy.map(r=>({...r}));$('#triageForm').reset();$('#search').value='';$('#levelFilter').value='';$('#statusFilter').value='';formSummary();render();navigate('dashboard');notify('คืนค่าข้อมูลจำลองเรียบร้อย')}});
 function csvCell(v){return '"'+String(v??'').replace(/"/g,'""').replace(/^[=+@\-\t\r]/,'\'$&')+'"'}
 $('#exportCsv').addEventListener('click',()=>{const fields=['code','age','sex','complaint','sbp','dbp','hr','rr','temp','spo2','pain','level','state','time'];const csv='\ufeff'+[fields.join(','),...records.map(r=>fields.map(k=>csvCell(r[k])).join(','))].join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download='smart_opd_triage_demo.csv';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);notify('ดาวน์โหลด CSV ข้อมูลจำลองแล้ว')});
@@ -80,6 +79,8 @@ document.querySelector('.triage-colors').outerHTML='<div class="triage-colors" r
     return;
   }
 
+  let sessionToken;
+  const loginGate = document.querySelector('#loginGate');
   document.querySelector('#loginForm').addEventListener('submit', function(event) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -89,10 +90,12 @@ document.querySelector('.triage-colors').outerHTML='<div class="triage-colors" r
     button.disabled = true;
 
     google.script.run
-      .withSuccessHandler(function(isValid) {
+      .withSuccessHandler(function(token) {
         button.disabled = false;
-        if (isValid) {
-          document.querySelector('#loginGate').remove();
+        if (token) {
+          sessionToken = token;
+          form.reset();
+          loginGate.remove();
         } else {
           error.textContent = 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง';
           form.elements.password.value = '';
@@ -102,9 +105,49 @@ document.querySelector('.triage-colors').outerHTML='<div class="triage-colors" r
       .withFailureHandler(function(failure) {
         button.disabled = false;
         error.textContent = 'ตรวจสอบการ Deploy และสิทธิ์เข้าถึง Google Apps Script';
-        console.error('validateLogin failed:', failure);
+        console.error('startTriageSession failed:', failure);
       })
-      .validateLogin(form.elements.username.value, form.elements.password.value);
+      .startTriageSession(form.elements.username.value, form.elements.password.value);
+  });
+
+  document.querySelector('#triageForm').addEventListener('submit', function(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('[type="submit"]');
+    if (!sessionToken || button.disabled || !form.reportValidity()) return;
+    const record = Object.fromEntries(new FormData(form).entries());
+    record.code = record.code.trim();
+    if (records.some(row => row.code.toLowerCase() === record.code.toLowerCase())) {
+      notify('รหัสผู้ป่วยจำลองนี้มีแล้ว โปรดใช้รหัสอื่น');
+      form.elements.code.focus();
+      return;
+    }
+    button.disabled = true;
+    google.script.run
+      .withSuccessHandler(function(result) {
+        button.disabled = false;
+        if (result.sessionExpired) {
+          sessionToken = null;
+          loginGate.querySelector('#loginError').textContent = 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง';
+          document.body.append(loginGate);
+          loginGate.querySelector('#loginUsername').focus();
+          return;
+        }
+        const time = new Intl.DateTimeFormat('th-TH', {
+          hour: '2-digit', minute: '2-digit', hour12: false
+        }).format(new Date(result.recordedAt));
+        records.push({...record, level: Number(record.level), time});
+        form.reset();
+        formSummary();
+        notify('บันทึกข้อมูลจำลองลง Google Sheets สำเร็จ');
+        navigate('patients');
+      })
+      .withFailureHandler(function(error) {
+        button.disabled = false;
+        notify('บันทึกลง Google Sheets ไม่สำเร็จ กรุณาลองอีกครั้ง');
+        console.error('saveTriageRecord failed:', error);
+      })
+      .saveTriageRecord(sessionToken, record);
   });
 })();
 </script></body></html>
